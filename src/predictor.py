@@ -389,13 +389,13 @@ class ScoringService(object):
     def compute_cv(cls, ypred, ytrue):
         # cv
         cvs = pd.DataFrame()
-        cvs['metric'] = np.array(['rmse', 'accuracy', 'corr', 'spearman_corr'])
+        cvs['metric'] = np.array(['rmse', 'mae', 'corr', 'spearman_corr'])
         cvs['value'] = 0
 
         # RMSE
         cvs.loc[cvs['metric'] == 'rmse', 'value'] = np.sqrt(metrics.mean_squared_error(ypred, ytrue))
-        # 精度
-        cvs.loc[cvs['metric'] == 'accuracy', 'value'] = metrics.accuracy_score(ypred, ytrue)
+        # MAE
+        cvs.loc[cvs['metric'] == 'mae', 'value'] = metrics.mean_absolute_error(ypred, ytrue)
         # 相関係数
         cvs.loc[cvs['metric'] == 'corr', 'value'] = np.corrcoef(ytrue, ypred)[0, 1]
         # 順位相関
