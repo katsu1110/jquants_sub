@@ -1,20 +1,17 @@
 # -*- coding: utf-8 -*-
 import io
 import os
+import random
 import glob
 import pickle
-import joblib
+import pathlib
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostRegressor
-from sklearn.preprocessing import LabelEncoder
+import tensorflow as tf
 from tqdm.auto import tqdm
 from sklearn import utils
 from sklearn import metrics
 from scipy import stats
-import operator
 
 class ScoringService(object):
     # 訓練期間終了日
@@ -27,11 +24,9 @@ class ScoringService(object):
     TEST_START = "2020-01-01"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
-    for i in [5, 10]:
-        TARGET_LABELS += [f'label_high_{i}', f'label_low_{i}']
     
     # model names
-    MODEL_NAMES = ['lgb', ]
+    MODEL_NAMES = ['mlp', ]
 
     # データをこの変数に読み込む
     dfs = None
@@ -56,7 +51,7 @@ class ScoringService(object):
                 # "stock_fin_price": f"{dataset_dir}/stock_fin_price.csv.gz",
                 "stock_labels": f"{dataset_dir}/stock_labels.csv.gz",
             }
-        else:
+        else: # already de-frozen?
             inputs = {
                 "stock_list": f"{dataset_dir}/stock_list.csv",
                 "stock_price": f"{dataset_dir}/stock_price.csv",
@@ -177,17 +172,10 @@ class ScoringService(object):
     
     @classmethod
     def fin_fe(cls, fin_data):
-        # # obj to int
-        f = 'Result_FinancialStatement AccountingStandard'
-        mapper = {
-            'NonConsolidated': 0,
-            'ConsolidatedJP': 1,
-            'ConsolidatedUS': 2,
-            'ConsolidatedIFRS': 3
-        }
-        fin_data[f] = fin_data[f].map(mapper).fillna(0)
-        fin_data[f] = fin_data[f].astype(int)
-
+        """
+        generate financial statement features
+        """
+        # cat obj to numbers
         f = 'Result_FinancialStatement ReportType'
         mapper = {
             'Q1': 1.0,
@@ -207,12 +195,12 @@ class ScoringService(object):
         fin_data[f] = fin_data[f].map(mapper).fillna(0)
         fin_data[f] = fin_data[f].astype(int)
 
-        # zaimu
+        # some financial indicators
         fin_data["profit_margin"] = fin_data["Result_FinancialStatement NetIncome"]/ (fin_data["Result_FinancialStatement NetSales"]+1)
-        fin_data["profit_margin"][fin_data["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
+        fin_data["profit_margin"][fin_data["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = fin_data["profit_margin"].median()
         fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"]/(fin_data["Result_FinancialStatement TotalAssets"]+1)
         
-        # only 1 year column
+        # only 1 year column is enough?
         years = [f for f in fin_data.columns.values.tolist() if ('Year' in f) & (f != 'Result_FinancialStatement FiscalYear')]
         fin_data = fin_data[[f for f in fin_data.columns.values.tolist() if f not in years]]
         
@@ -220,17 +208,14 @@ class ScoringService(object):
 
     @classmethod
     def price_fe(cls, feats):
-        # # minmax
-        # feats['price_min2max'] = feats['EndOfDayQuote Low'] / feats['EndOfDayQuote High'] 
-        
-        # # open close
-        # feats['price_open2close'] = feats['EndOfDayQuote Open'] / feats['EndOfDayQuote Close'] 
-        
+        """
+        generate price features
+        """
         # fのX営業日...
         features = ["EndOfDayQuote ExchangeOfficialClose", 'EndOfDayQuote Volume', ]
         new_feats = []
         for f in features:
-            for x in [5, 10, 20, 40, ]:
+            for x in [5, 10, 20]:
                 # return 
                 feats[f"{f}_return_{x}days"] = feats[
                     f
@@ -244,22 +229,6 @@ class ScoringService(object):
                     .std()
                 )
 
-                # skew
-                feats[f"{f}_skew_{x}days"] = (
-                    np.log1p(feats[f])
-                    .diff()
-                    .rolling(x)
-                    .skew()
-                )
-
-                # kurt
-                feats[f"{f}_kurt_{x}days"] = (
-                    np.log1p(feats[f])
-                    .diff()
-                    .rolling(x)
-                    .kurt()
-                )
-
                 # kairi
                 feats[f"{f}_MA_gap_{x}days"] = feats[f] / (
                     feats[f].rolling(x).mean()
@@ -269,13 +238,11 @@ class ScoringService(object):
                 new_feats += [
                     f"{f}_return_{x}days", 
                     f"{f}_volatility_{x}days",
-                    f"{f}_skew_{x}days", 
-                    f"{f}_kurt_{x}days", 
                     f"{f}_MA_gap_{x}days"
                              ]
                 
-#         # 欠損値処理
-#         feats = feats.fillna(0)
+        # 欠損値処理
+        feats = feats.fillna(0)
 
         # 元データのカラムを削除
         feats = feats[new_feats + features]
@@ -308,8 +275,8 @@ class ScoringService(object):
         fin_data = fin_data.loc[pd.Timestamp(start_dt) - pd.offsets.BDay(n) :]
         # fin_dataのnp.float64のデータのみを取得
         fin_feats = fin_data.select_dtypes(include=["float64", 'int'])
-#         # 欠損値処理
-#         fin_feats = fin_feats.fillna(0)
+        # 欠損値処理
+        fin_feats = fin_feats.fillna(0)
 
         # stock_priceデータを読み込む
         price = dfs["stock_price"]
@@ -334,32 +301,26 @@ class ScoringService(object):
         # merge list
         list_data = list_data[["Local Code", "17 Sector(Code)", "33 Sector(Code)", "Size Code (New Index Series)", "IssuedShareEquityQuote IssuedShare"]]
         list_data.columns = ["Local Code", "sector17", "sector33", "size_group", "share"]
-        list_data["size_group"] = list_data["size_group"].replace('-', -999).astype(int)
+        list_data["size_group"] = list_data["size_group"].replace('-', 0).astype(int)
 
         # 財務データの特徴量とマーケットデータの特徴量のインデックスを合わせる
         feats = feats.loc[feats.index.isin(fin_feats.index)]
         fin_feats = fin_feats.loc[fin_feats.index.isin(feats.index)]
 
         # データを結合
-        feats = pd.concat([feats, fin_feats], axis=1)
-#         feats = pd.concat([feats, fin_feats], axis=1).dropna()
+        feats = pd.concat([feats, fin_feats], axis=1).dropna()
 
-        # zaimu feats
+        # more zaimu feats
         feats['sector17'] = list_data['sector17'].values[-1]
         feats['sector33'] = list_data['sector33'].values[-1]
         feats['size_group'] = list_data['size_group'].values[-1]
-        feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
-        feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / (list_data["share"]+1))
-        feats["per"][feats["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
-        feats["pbr"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetAssets"]*1000000 / (list_data["share"]+1))
-        feats["roe"] = feats["pbr"] / feats["per"]
-
+        
         # drops
         drops = ["EndOfDayQuote ExchangeOfficialClose", "EndOfDayQuote Volume", "Local Code"]
         feats = feats[[f for f in feats.columns.values.tolist() if f not in drops]]
 
         # 欠損値処理を行います。
-        feats = feats.replace([np.inf, -np.inf], np.nan)
+        feats = feats.replace([np.inf, -np.inf], 0)
 
         # 銘柄コードを設定
         feats["code"] = code
@@ -390,7 +351,7 @@ class ScoringService(object):
             "technical_only": technical_cols,
 #             "fundamental+technical": list(fundamental_cols) + list(technical_cols),
             "fundamental+technical": [f for f in train_X.columns.values.tolist() if f not in ['code', 
-                            "Result_Dividend DividendPayableDate", "Local Code"]],
+                                        "Result_Dividend DividendPayableDate", "Local Code"]], # all features
         }
         return columns[column_group]
 
@@ -413,106 +374,90 @@ class ScoringService(object):
         return cvs
 
     @classmethod
-    def get_params(cls, model_name):
+    def get_params(cls):
+        """
+        dispatch model hyperparameters
+        """
         params = {
-            'xgb': {
-                'colsample_bytree': 0.7,                 
-                'learning_rate': 0.08,
-                'max_depth': 7,
-                'subsample': 1,
-                'min_child_weight': 4,
-                'gamma': 0.24,
-                'alpha': 1,
-                'lambda': 1,
-                'seed': 42,
-                'n_estimators': 24000,
-                "objective": 'reg:pseudohubererror',
-                "eval_metric": "mae"
-                },
-                
-            'lgb': {
-                'n_estimators': 24000,
-                'objective': 'huber',
-                'boosting_type': 'gbdt',
-                'max_depth': 7,
-                'learning_rate': 0.08,
-                'subsample': 0.72,
-                'subsample_freq': 4,
-                'feature_fraction': 0.4,
-                'lambda_l1': 1,
-                'lambda_l2': 1,
-                'seed': 42,
-                'early_stopping_rounds': 100,
-                'metric': 'mae'
-                },
-
-            'catb': { 'task_type': "CPU",
-                'learning_rate': 0.08, 
-                'iterations': 24000,
-                'colsample_bylevel': 0.5,
-                'random_seed': 42,
-                'use_best_model': True,
-                'early_stopping_rounds': 100,
-                'loss_function': 'MAE',
-                'eval_metric': 'MAE',
-                },
-            }
-            
-        return params[model_name]
+            'input_dropout': 0.0,
+            'hidden_layers': 3,
+            'hidden_units': 128,
+            'hidden_activation': 'relu', 
+            'hidden_dropout': 0.2,
+            'gauss_noise': 0.01,
+            'lr': 1e-3,
+            'batch_size': 128,
+            'epochs': 100
+        }
+        return params
     
     @classmethod
-    def fit_model(cls, train_X, train_y, val_X, val_y, feature_columns, model_name='lgb'):
-        # params
-        params = cls.get_params(model_name)
+    def fit_mlp(cls, train_X: pd.DataFrame, train_y: np.array, val_X: pd.DataFrame, val_y: np.array):
+        """
+        fit a MLP
         
+        """
+        print('TRAIN:')
+        print(train_X.info())
+
+        print('VALID:')
+        print(val_X.info())
+
+        # fillna
+        train_X = train_X.fillna(train_X.median())
+        val_X = val_X.fillna(val_X.median())
+
+        # set seed to reproduce the result
+        def seed_everything(seed : int):    
+            random.seed(seed)
+            np.random.seed(seed)
+            os.environ['PYTHONHASHSEED'] = str(seed)
+            tf.random.set_seed(seed)
+
+        seed_everything(326) 
+
+        # hyperparameters
+        params = cls.get_params()
+        
+        # NN model architecture        
+        inputs = tf.keras.layers.Input(shape=(train_X.shape[1], ))
+        x = tf.keras.layers.BatchNormalization()(inputs)
+        x = tf.keras.layers.Dense(params['hidden_units'], activation=params['hidden_activation'])(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.GaussianNoise(params['gauss_noise'])(x)
+        x = tf.keras.layers.Dropout(params['hidden_dropout'])(x)
+        
+        # more layers
+        for i in np.arange(params['hidden_layers'] - 1):
+            x = tf.keras.layers.Dense(params['hidden_units'] // (2 * (i+1)), activation=params['hidden_activation'])(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.GaussianNoise(params['gauss_noise'])(x)
+            x = tf.keras.layers.Dropout(params['hidden_dropout'])(x)
+
+        # output
+        outs = tf.keras.layers.Dense(1, activation="linear", name="out")(x)
+        loss = "mae" # mean absolute error as a loss
+        model = tf.keras.models.Model(inputs=inputs, outputs=outs) 
+
+        # compile
+        opt = tf.keras.optimizers.Adam(lr=params['lr'], beta_1=0.9, beta_2=0.999, decay=params['lr']/100)
+        model.compile(loss=loss, optimizer=opt, metrics=[])
+
+        # callbacks
+        early_stop = tf.keras.callbacks.EarlyStopping(patience=16, min_delta=params['lr'], 
+                                                      restore_best_weights=True, monitor='val_loss')
+        lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=10, 
+                                                           verbose=1, epsilon=params['lr'], mode='min')
+
         # fit
-        if 'xgb' in model_name:
-            # fit
-            model = xgb.XGBRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, 
-                eval_set=[(val_X[feature_columns], val_y)],
-                early_stopping_rounds=100, verbose=2)
+        history = model.fit(train_X, train_y, callbacks=[early_stop, lr_schedule],
+                    epochs=params['epochs'], batch_size=params['batch_size'],
+                    validation_data=(val_X, val_y))
 
-            # feature importance
-            importance = model.get_booster().get_score(importance_type='gain')
-            importance = sorted(importance.items(), key=operator.itemgetter(1))
-            df = pd.DataFrame(importance, columns=['feature', 'fscore'])
-            df['fscore'] = df['fscore'] / df['fscore'].sum()
-            fi = np.zeros(len(feature_columns))
-            for i, f in enumerate(feature_columns):
-                try:
-                    fi[i] = df.loc[df['feature'] == f, "fscore"].iloc[0]
-                except: # ignored by XGB
-                    continue
-            
-            # predict for val
-            pred_y = model.predict(val_X[feature_columns])
-            
-        elif 'lgb' in model_name:
-            # fit
-            model = lgb.LGBMRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, eval_set=[(val_X[feature_columns], val_y)],
-                verbose=-1)
-            
-            # feature importance
-            fi = model.booster_.feature_importance(importance_type="gain")
+        # predict
+        pred_y = model.predict(val_X).ravel()
 
-            # predict for val
-            pred_y = model.predict(val_X[feature_columns])
-            
-        elif 'catb' in model_name:
-            # fit
-            model = CatBoostRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, eval_set=(val_X[feature_columns], val_y),
-                verbose=3000)
-
-            # feature importance
-            fi = model.get_feature_importance()
-
-            # predict for val
-            pred_y = model.predict(val_X[feature_columns])
-
-        return model, fi, pred_y
+        return model, pred_y
     
     @classmethod
     def create_model(cls, dfs, codes, label, model_name='xgb1'):
@@ -537,22 +482,16 @@ class ScoringService(object):
         feature_columns = cls.get_feature_columns(dfs, train_X)
 
         # params
-        params = cls.get_params(model_name)
-        
+        params = cls.get_params()
+
         # model fitting
-        model, fi, pred_y = cls.fit_model(train_X, train_y, val_X, val_y, 
-                                          feature_columns, 
-                                          model_name=model_name)
-        
-        # feature importances
-        fi_df = pd.DataFrame()
-        fi_df['features'] = feature_columns
-        fi_df['importance'] = fi
+        model, pred_y = cls.fit_mlp(train_X[feature_columns], train_y,
+            val_X[feature_columns], val_y)
 
         # cv scores
         cvs = cls.compute_cv(pred_y, val_y)
 
-        return model, fi_df, cvs
+        return model, cvs
 
     @classmethod
     def save_model(cls, model, label, model_name, model_path="../model"):
@@ -566,22 +505,12 @@ class ScoringService(object):
         """
         # tag::save_model_partial[]
         # モデル保存先ディレクトリを作成
-        os.makedirs(model_path, exist_ok=True)
+        os.makedirs(pathlib.Path(model_path), exist_ok=True)
         # with open(os.path.join(model_path, f"my_model_{label}.pkl"), "wb") as f:
         #     # モデルをpickle形式で保存
         #     pickle.dump(model, f)
         # end::save_model_partial[]
-        joblib.dump(model, model_path + f'/{model_name}_{label}.pkl')
-
-    @classmethod
-    def save_fi_cv(cls, fi_df, cvs, model_path='../model'):
-        os.makedirs(model_path, exist_ok=True)
-        # with open(os.path.join(model_path, f"my_model_{label}.pkl"), "wb") as f:
-        #     # モデルをpickle形式で保存
-        #     pickle.dump(model, f)
-        # end::save_model_partial[]
-        fi_df.to_csv(model_path + '/feature_importance.csv', index=False)
-        cvs.to_csv(model_path + '/cross_validation_scores.csv', index=False)
+        model.save(pathlib.Path(f'{model_path}/{model_name}_{label}.h5'))
 
     @classmethod
     def get_model(cls, model_path="../model", labels=None, model_names=None):
@@ -603,14 +532,31 @@ class ScoringService(object):
             model_names = cls.MODEL_NAMES
         for model_name in model_names:
             for label in labels:
+                # model path
                 m = os.path.join(model_path, f"{model_name}_{label}.pkl")
+
+                # load model
+                tf.keras.backend.clear_session()
+                model = tf.keras.models.load_model(pathlib.Path(m))
                 # m = os.path.join(model_path, f"my_model_{label}.pkl")
                 # with open(m, "rb") as f:
                 #     # pickle形式で保存されているモデルを読み込み
                 #     cls.models[label] = pickle.load(f)
-                cls.models[f'{model_name}_{label}'] = joblib.load(m)
+                cls.models[f'{model_name}_{label}'] = model
 
         return True
+
+    @classmethod
+    def save_score(cls, cvs, model_path='../model'):
+        """
+        save validation score records
+        """
+        os.makedirs(model_path, exist_ok=True)
+        # with open(os.path.join(model_path, f"my_model_{label}.pkl"), "wb") as f:
+        #     # モデルをpickle形式で保存
+        #     pickle.dump(model, f)
+        # end::save_model_partial[]
+        cvs.to_csv(pathlib.Path(f'{model_path}/cross_validation_scores.csv'), index=False)
 
     @classmethod
     def train_and_save_model(
@@ -643,16 +589,13 @@ class ScoringService(object):
             for label in labels:
 
                 # get model
-                model, fi_df, cvs = cls.create_model(cls.dfs, codes=codes, label=label, model_name=model_name)
+                model, cvs = cls.create_model(cls.dfs, codes=codes, label=label, model_name=model_name)
                 
                 # assign
-                fi_df = fi_df.rename(columns={'importance': f'{model_name}_{label}'})
                 cvs = cvs.rename(columns={'value': f'{model_name}_{label}'})
                 if counts == 0:
-                    feature_importance_df = fi_df.copy()
                     cv_df = cvs.copy()
                 else:
-                    feature_importance_df = feature_importance_df.merge(fi_df, how='left', on='features')
                     cv_df = cv_df.merge(cvs, how='left', on='metric')
                 counts += 1
 
@@ -660,7 +603,7 @@ class ScoringService(object):
                 cls.save_model(model, label, model_name, model_path=model_path)
         
         # save feature importance and cv scores
-        cls.save_fi_cv(feature_importance_df, cv_df, model_path=model_path)
+        cls.save_score(cv_df, model_path=model_path)
 
     @classmethod
     def predict(cls, inputs, labels=None, model_names=None, codes=None, 
@@ -718,29 +661,17 @@ class ScoringService(object):
         # get model
         cls.get_model(model_path=model_path, labels=labels, model_names=model_names)
 
-        # 目的変数毎に予測
-        for label in ["label_high_20", "label_low_20"]:
-            df[label] = 0
-        
+        # 目的変数毎に予測        
         num_models = len(model_names) * len(labels) // 2 
-            
         for label in labels:
-            if 'high' in label:
-                label_ = "label_high_20"
-            elif 'low' in label:
-                label_ = "label_low_20"
-            
+            df[label] = 0
             for model_name in model_names:
                 print(f'{model_name}_{label}')
 
-                # 予測実施
-#                 assert label in df.columns.values.tolist()
-#                 assert f'{model_name}_{label}' in list(cls.models.keys())
+                # 予測実施                
+                df[label] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]).ravel() / num_models
                 
-                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) / num_models
-                
-        # 出力対象列に追加
-        for label in ["label_high_20", "label_low_20"]:
+            # 出力対象列に追加
             output_columns.append(label)
 
         out = io.StringIO()

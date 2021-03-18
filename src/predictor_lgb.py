@@ -27,6 +27,7 @@ class ScoringService(object):
     TEST_START = "2020-01-01"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
+
     for i in [5, 10]:
         TARGET_LABELS += [f'label_high_{i}', f'label_low_{i}']
     
@@ -348,11 +349,11 @@ class ScoringService(object):
         feats['sector17'] = list_data['sector17'].values[-1]
         feats['sector33'] = list_data['sector33'].values[-1]
         feats['size_group'] = list_data['size_group'].values[-1]
-        feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
-        feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / (list_data["share"]+1))
-        feats["per"][feats["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
-        feats["pbr"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetAssets"]*1000000 / (list_data["share"]+1))
-        feats["roe"] = feats["pbr"] / feats["per"]
+        # feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
+        # feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / (list_data["share"]+1))
+        # feats["per"][feats["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
+        # feats["pbr"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetAssets"]*1000000 / (list_data["share"]+1))
+        # feats["roe"] = feats["pbr"] / feats["per"]
 
         # drops
         drops = ["EndOfDayQuote ExchangeOfficialClose", "EndOfDayQuote Volume", "Local Code"]
