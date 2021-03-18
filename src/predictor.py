@@ -27,8 +27,11 @@ class ScoringService(object):
     TEST_START = "2020-01-01"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
+    for i in [5, 10]:
+        TARGET_LABELS += [f'label_high_{i}', f'label_low_{i}']
+    
     # model names
-    MODEL_NAMES = ['lgb', 'catb', 'xgb']
+    MODEL_NAMES = ['lgb', ]
 
     # データをこの変数に読み込む
     dfs = None
@@ -182,7 +185,7 @@ class ScoringService(object):
             'ConsolidatedUS': 2,
             'ConsolidatedIFRS': 3
         }
-        fin_data[f] = fin_data[f].map(mapper).fillna(4)
+        fin_data[f] = fin_data[f].map(mapper).fillna(0)
         fin_data[f] = fin_data[f].astype(int)
 
         f = 'Result_FinancialStatement ReportType'
@@ -201,13 +204,17 @@ class ScoringService(object):
             'SE': 2,
             'IN': 3
         }
-        fin_data[f] = fin_data[f].map(mapper).fillna(4)
+        fin_data[f] = fin_data[f].map(mapper).fillna(0)
         fin_data[f] = fin_data[f].astype(int)
 
         # zaimu
         fin_data["profit_margin"] = fin_data["Result_FinancialStatement NetIncome"]/ (fin_data["Result_FinancialStatement NetSales"]+1)
         fin_data["profit_margin"][fin_data["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
         fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"]/(fin_data["Result_FinancialStatement TotalAssets"]+1)
+        
+        # only 1 year column
+        years = [f for f in fin_data.columns.values.tolist() if ('Year' in f) & (f != 'Result_FinancialStatement FiscalYear')]
+        fin_data = fin_data[[f for f in fin_data.columns.values.tolist() if f not in years]]
         
         return fin_data
 
@@ -223,7 +230,7 @@ class ScoringService(object):
         features = ["EndOfDayQuote ExchangeOfficialClose", 'EndOfDayQuote Volume', ]
         new_feats = []
         for f in features:
-            for x in [5, 20, 40, 60, ]:
+            for x in [5, 10, 20, 40, ]:
                 # return 
                 feats[f"{f}_return_{x}days"] = feats[
                     f
@@ -341,10 +348,10 @@ class ScoringService(object):
         feats['sector17'] = list_data['sector17'].values[-1]
         feats['sector33'] = list_data['sector33'].values[-1]
         feats['size_group'] = list_data['size_group'].values[-1]
-        # feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
-        feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / list_data["share"])
+        feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
+        feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / (list_data["share"]+1))
         feats["per"][feats["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
-        feats["pbr"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetAssets"]*1000000 / list_data["share"])
+        feats["pbr"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetAssets"]*1000000 / (list_data["share"]+1))
         feats["roe"] = feats["pbr"] / feats["per"]
 
         # drops
@@ -381,7 +388,9 @@ class ScoringService(object):
             "fundamental_only": fundamental_cols,
             "return_only": returns_cols,
             "technical_only": technical_cols,
-            "fundamental+technical": list(fundamental_cols) + list(technical_cols),
+#             "fundamental+technical": list(fundamental_cols) + list(technical_cols),
+            "fundamental+technical": [f for f in train_X.columns.values.tolist() if f not in ['code', 
+                            "Result_Dividend DividendPayableDate", "Local Code"]],
         }
         return columns[column_group]
 
@@ -404,72 +413,59 @@ class ScoringService(object):
         return cvs
 
     @classmethod
-    def create_model(cls, dfs, codes, label, model_name='xgb1'):
-        """
-        Args:
-            dfs (dict)  : dict of pd.DataFrame include stock_fin, stock_price
-            codes (list[int]): A local code for a listed company
-            label (str): prediction target label
-        Returns:
-            RandomForestRegressor
-        """
-        # 特徴量を取得
-        buff = []
-        for code in codes:
-            buff.append(cls.get_features_for_predict(cls.dfs, code))
-        feature = pd.concat(buff)
-        # 特徴量と目的変数を一致させて、データを分割
-        train_X, train_y, val_X, val_y, test_X, test_y = cls.get_features_and_label(
-            dfs, codes, feature, label
-        )
-        # 特徴量カラムを指定
-        feature_columns = cls.get_feature_columns(dfs, train_X)
-
-        # params
-        params = {'xgb': {
-                        'colsample_bytree': 0.7,                 
-                        'learning_rate': 0.08,
-                        'max_depth': 7,
-                        'subsample': 1,
-                        'min_child_weight': 4,
-                        'gamma': 0.24,
-                        'alpha': 1,
-                        'lambda': 1,
-                        'seed': 42,
-                        'n_estimators': 24000,
-                        "objective": 'reg:pseudohubererror',
-                        "eval_metric": "mae"
+    def get_params(cls, model_name):
+        params = {
+            'xgb': {
+                'colsample_bytree': 0.7,                 
+                'learning_rate': 0.08,
+                'max_depth': 7,
+                'subsample': 1,
+                'min_child_weight': 4,
+                'gamma': 0.24,
+                'alpha': 1,
+                'lambda': 1,
+                'seed': 42,
+                'n_estimators': 24000,
+                "objective": 'reg:pseudohubererror',
+                "eval_metric": "mae"
                 },
                 
-                'lgb': {
-                    'n_estimators': 24000,
-                    'objective': 'huber',
-                    'boosting_type': 'gbdt',
-                    'max_depth': -1,
-                    'learning_rate': 0.08,
-                    'subsample': 0.72,
-                    'subsample_freq': 4,
-                    'feature_fraction': 0.4,
-                    'lambda_l1': 1,
-                    'lambda_l2': 1,
-                    'seed': 42,
-                    'early_stopping_rounds': 100,
-                    'metric': 'mae'
-                    },
-                
-                'catb': { 'task_type': "CPU",
-                    'learning_rate': 0.08, 
-                    'iterations': 24000,
-                    'colsample_bylevel': 0.5,
-                    'random_seed': 42,
-                    'use_best_model': True,
-                    'early_stopping_rounds': 100,
-                    'loss_function': 'MAE',
-                    'eval_metric': 'MAE',
-                    },
-            }
+            'lgb': {
+                'n_estimators': 24000,
+                'objective': 'huber',
+                'boosting_type': 'gbdt',
+                'max_depth': 7,
+                'learning_rate': 0.08,
+                'subsample': 0.72,
+                'subsample_freq': 4,
+                'feature_fraction': 0.4,
+                'lambda_l1': 1,
+                'lambda_l2': 1,
+                'seed': 42,
+                'early_stopping_rounds': 100,
+                'metric': 'mae'
+                },
 
-        # model fitting
+            'catb': { 'task_type': "CPU",
+                'learning_rate': 0.08, 
+                'iterations': 24000,
+                'colsample_bylevel': 0.5,
+                'random_seed': 42,
+                'use_best_model': True,
+                'early_stopping_rounds': 100,
+                'loss_function': 'MAE',
+                'eval_metric': 'MAE',
+                },
+            }
+            
+        return params[model_name]
+    
+    @classmethod
+    def fit_model(cls, train_X, train_y, val_X, val_y, feature_columns, model_name='lgb'):
+        # params
+        params = cls.get_params(model_name)
+        
+        # fit
         if 'xgb' in model_name:
             # fit
             model = xgb.XGBRegressor(**params[model_name])
@@ -482,8 +478,8 @@ class ScoringService(object):
             importance = sorted(importance.items(), key=operator.itemgetter(1))
             df = pd.DataFrame(importance, columns=['feature', 'fscore'])
             df['fscore'] = df['fscore'] / df['fscore'].sum()
-            fi = np.zeros(len(cls.features))
-            for i, f in enumerate(cls.features):
+            fi = np.zeros(len(feature_columns))
+            for i, f in enumerate(feature_columns):
                 try:
                     fi[i] = df.loc[df['feature'] == f, "fscore"].iloc[0]
                 except: # ignored by XGB
@@ -516,6 +512,38 @@ class ScoringService(object):
             # predict for val
             pred_y = model.predict(val_X[feature_columns])
 
+        return model, fi, pred_y
+    
+    @classmethod
+    def create_model(cls, dfs, codes, label, model_name='xgb1'):
+        """
+        Args:
+            dfs (dict)  : dict of pd.DataFrame include stock_fin, stock_price
+            codes (list[int]): A local code for a listed company
+            label (str): prediction target label
+        Returns:
+            RandomForestRegressor
+        """
+        # 特徴量を取得
+        buff = []
+        for code in codes:
+            buff.append(cls.get_features_for_predict(cls.dfs, code))
+        feature = pd.concat(buff)
+        # 特徴量と目的変数を一致させて、データを分割
+        train_X, train_y, val_X, val_y, test_X, test_y = cls.get_features_and_label(
+            dfs, codes, feature, label
+        )
+        # 特徴量カラムを指定
+        feature_columns = cls.get_feature_columns(dfs, train_X)
+
+        # params
+        params = cls.get_params(model_name)
+        
+        # model fitting
+        model, fi, pred_y = cls.fit_model(train_X, train_y, val_X, val_y, 
+                                          feature_columns, 
+                                          model_name=model_name)
+        
         # feature importances
         fi_df = pd.DataFrame()
         fi_df['features'] = feature_columns
@@ -691,19 +719,27 @@ class ScoringService(object):
         cls.get_model(model_path=model_path, labels=labels, model_names=model_names)
 
         # 目的変数毎に予測
-        num_models = len(model_names)
-        for label in labels:
+        for label in ["label_high_20", "label_low_20"]:
             df[label] = 0
+        
+        num_models = len(model_names) * len(labels) // 2 
+            
+        for label in labels:
+            if 'high' in label:
+                label_ = "label_high_20"
+            elif 'low' in label:
+                label_ = "label_low_20"
             for model_name in model_names:
                 print(f'{model_name}_{label}')
 
                 # 予測実施
-                assert label in df.columns.values.tolist()
-                assert f'{model_name}_{label}' in list(cls.models.keys())
+#                 assert label in df.columns.values.tolist()
+#                 assert f'{model_name}_{label}' in list(cls.models.keys())
                 
-                df[label] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) / num_models
+                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) / num_models
                 
-            # 出力対象列に追加
+        # 出力対象列に追加
+        for label in ["label_high_20", "label_low_20"]:
             output_columns.append(label)
 
         out = io.StringIO()
