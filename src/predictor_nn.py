@@ -533,7 +533,7 @@ class ScoringService(object):
         for model_name in model_names:
             for label in labels:
                 # model path
-                m = os.path.join(model_path, f"{model_name}_{label}.pkl")
+                m = os.path.join(model_path, f"{model_name}_{label}.h5")
 
                 # load model
                 tf.keras.backend.clear_session()
