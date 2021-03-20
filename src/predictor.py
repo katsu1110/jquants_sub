@@ -209,6 +209,7 @@ class ScoringService(object):
         fin_data[f] = fin_data[f].astype(int)
 
         # zaimu
+        fin_data["Result_FinancialStatement NetSales"] = fin_data["Result_FinancialStatement NetSales"] / fin_data["Result_FinancialStatement ReportType"]
         fin_data["profit_margin"] = fin_data["Result_FinancialStatement NetIncome"]/ (fin_data["Result_FinancialStatement NetSales"]+1)
         fin_data["profit_margin"][fin_data["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
         fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"]/(fin_data["Result_FinancialStatement TotalAssets"]+1)
@@ -716,16 +717,17 @@ class ScoringService(object):
         feature_columns = cls.get_feature_columns(cls.dfs, feats)
         print('{:,} features: {}'.format(len(feature_columns), feature_columns))
         
-        # get model
-        cls.get_model(model_path=model_path, labels=labels, model_names=model_names)
+        # # get model
+        # cls.get_model(model_path=model_path, labels=labels, model_names=model_names)
 
         # 目的変数毎に予測
         for label in ["label_high_20", "label_low_20"]:
             df[label] = 0
         
         num_models = len(model_names) * len(labels) // 2 
-            
+        sum_weights = 0
         for label in labels:
+            weight = int(label.split('_')[-1])
             if 'high' in label:
                 label_ = "label_high_20"
             elif 'low' in label:
@@ -738,7 +740,7 @@ class ScoringService(object):
 #                 assert label in df.columns.values.tolist()
 #                 assert f'{model_name}_{label}' in list(cls.models.keys())
                 
-                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) / num_models
+                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / 25
                 
         # 出力対象列に追加
         for label in ["label_high_20", "label_low_20"]:
