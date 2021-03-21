@@ -165,6 +165,7 @@ class ScoringService(object):
                 trains_y.append(_train_y)
                 vals_y.append(_val_y)
                 tests_y.append(_test_y)
+
         # 銘柄毎に作成した説明変数データを結合します。
         train_X = pd.concat(trains_X)
         val_X = pd.concat(vals_X)
@@ -215,8 +216,13 @@ class ScoringService(object):
         fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"]/(fin_data["Result_FinancialStatement TotalAssets"]+1)
         
         # only 1 year column
-        years = [f for f in fin_data.columns.values.tolist() if ('Year' in f) & (f != 'Result_FinancialStatement FiscalYear')]
-        fin_data = fin_data[[f for f in fin_data.columns.values.tolist() if f not in years]]
+        drops = [f for f in fin_data.columns.values.tolist() if ('Year' in f) & (f != 'Result_FinancialStatement FiscalYear')]
+        drops += ['Forecast_FinancialStatement AccountingStandard', 'Forecast_FinancialStatement FiscalPeriodEnd',
+            'Forecast_FinancialStatement ReportType', 'Forecast_FinancialStatement ModifyDate',
+            'Forecast_FinancialStatement CompanyType', 'Forecast_Dividend RecordDate',
+            'Forecast_Dividend FiscalPeriodEnd', 'Forecast_Dividend ReportType', 
+            'Forecast_Dividend ModifyDate']
+        fin_data = fin_data[[f for f in fin_data.columns.values.tolist() if f not in drops]]
         
         # fillna
         fin_data.fillna(method='bfill', inplace=True)
@@ -256,16 +262,25 @@ class ScoringService(object):
 
     @classmethod
     def price_fe(cls, feats):
-        # # minmax
-        # feats['price_min2max'] = feats['EndOfDayQuote Low'] / feats['EndOfDayQuote High'] 
+        # minmax
+        feats['price_min2max'] = feats['EndOfDayQuote Low'] / (feats['EndOfDayQuote High'] + 1)
         
-        # # open close
-        # feats['price_open2close'] = feats['EndOfDayQuote Open'] / feats['EndOfDayQuote Close'] 
+        # open close
+        feats['price_open2close'] = feats['EndOfDayQuote Open'] / (feats['EndOfDayQuote Close'] + 1)
         
         # fのX営業日...
         features = ["EndOfDayQuote ExchangeOfficialClose", 'EndOfDayQuote Volume', ]
-        new_feats = []
-        for f in features:
+        new_feats = ['price_min2max', 'price_open2close']
+        for i, f in enumerate(features):
+            # argmax, argmin
+            if i == 0:
+                feats['close_argmax'] = feats[f].argmax()
+                feats['close_argmin'] = feats[f].argmin()
+                new_feats += ['close_argmax', 'close_argmin']
+            elif i == 1:
+                feats['volume_argmax'] = feats[f].argmax()
+                feats['volume_argmin'] = feats[f].argmin()
+                new_feats += ['volume_argmax', 'volume_argmin']
             for x in [5, 10, 20, 40, ]:
                 # return 
                 feats[f"{f}_return_{x}days"] = feats[
@@ -296,18 +311,30 @@ class ScoringService(object):
                     .kurt()
                 )
 
-                # kairi
+                # kairi mean
                 feats[f"{f}_MA_gap_{x}days"] = feats[f] / (
                     feats[f].rolling(x).mean()
                 )
                 
+                # kairi max
+                feats[f"{f}_MAmax_gap_{x}days"] = feats[f] / (
+                    feats[f].rolling(x).max()
+                )
+
+                # kairi min
+                feats[f"{f}_MAmin_gap_{x}days"] = feats[f] / (
+                    feats[f].rolling(x).min()
+                )
+
                 # features to use
                 new_feats += [
                     f"{f}_return_{x}days", 
                     f"{f}_volatility_{x}days",
                     f"{f}_skew_{x}days", 
                     f"{f}_kurt_{x}days", 
-                    f"{f}_MA_gap_{x}days"
+                    f"{f}_MA_gap_{x}days",
+                    f"{f}_MAmax_gap_{x}days",
+                    f"{f}_MAmin_gap_{x}days",
                              ]
 
         # RSI
@@ -319,6 +346,8 @@ class ScoringService(object):
         feats['MACD'] = macd.values
         feats['MACD_9'] = exp3.values
         feats['MACD_d'] = feats['MACD'] / feats['MACD_9']
+        
+        new_feats += ['RSI', 'MACD', 'MACD_9', 'MACD_d']
                 
 #         # 欠損値処理
 #         feats = feats.fillna(0)
