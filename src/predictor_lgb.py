@@ -9,7 +9,6 @@ import pandas as pd
 import xgboost as xgb
 import lightgbm as lgb
 from catboost import CatBoostRegressor
-from sklearn.preprocessing import LabelEncoder
 from tqdm.auto import tqdm
 from sklearn import utils
 from sklearn import metrics
@@ -18,15 +17,17 @@ import operator
 
 class ScoringService(object):
     # 訓練期間終了日
-    TRAIN_END = "2018-12-31"
+    TRAIN_END = "2019-03-26"
     # 評価期間開始日
     VAL_START = "2019-03-27" # "2019-02-01"
     # 評価期間終了日
-    VAL_END = "2019-12-01"
+    VAL_END = "2019-12-31"
     # テスト期間開始日
     TEST_START = "2020-01-01"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
+    # compute cv?
+    IS_VAL = False
 
     for i in [5, 10]:
         TARGET_LABELS += [f'label_high_{i}', f'label_low_{i}']
@@ -209,24 +210,39 @@ class ScoringService(object):
         fin_data[f] = fin_data[f].map(mapper).fillna(0)
         fin_data[f] = fin_data[f].astype(int)
 
-        # zaimu
+        f = 'Result_FinancialStatement ChangeOfFiscalYearEnd'
+        fin_data[f] = fin_data[f].astype(str).map({'True': 1, 'False': 0, 'true': 1, 'false': 0})
+
+        # fillna
+        for f in [c for c in fin_data.columns[fin_data.columns.str.endswith('Share')].values.tolist()]:
+            fin_data[f].fillna(0, inplace=True)
+        # fin_data.fillna(method='ffill', inplace=True)
+        # fin_data.fillna(method='bfill', inplace=True)
+
+        # financial statement features
         fin_data["Result_FinancialStatement NetSales"] = fin_data["Result_FinancialStatement NetSales"] / fin_data["Result_FinancialStatement ReportType"]
-        fin_data["profit_margin"] = fin_data["Result_FinancialStatement NetIncome"]/ (fin_data["Result_FinancialStatement NetSales"]+1)
+        fin_data["profit_margin"] = fin_data["Result_FinancialStatement NetIncome"] / (fin_data["Result_FinancialStatement NetSales"]+1)
         fin_data["profit_margin"][fin_data["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
-        fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"]/(fin_data["Result_FinancialStatement TotalAssets"]+1)
+        fin_data["equity_ratio"] = fin_data["Result_FinancialStatement NetAssets"] / (fin_data["Result_FinancialStatement TotalAssets"]+1)
         
         # only 1 year column
         drops = [f for f in fin_data.columns.values.tolist() if ('Year' in f) & (f != 'Result_FinancialStatement FiscalYear')]
-        drops += ['Forecast_FinancialStatement AccountingStandard', 'Forecast_FinancialStatement FiscalPeriodEnd',
-            'Forecast_FinancialStatement ReportType', 'Forecast_FinancialStatement ModifyDate',
-            'Forecast_FinancialStatement CompanyType', 'Forecast_Dividend RecordDate',
-            'Forecast_Dividend FiscalPeriodEnd', 'Forecast_Dividend ReportType', 
-            'Forecast_Dividend ModifyDate', 'Result_Dividend DividendPayableDate']
+        drops += [
+            'Forecast_FinancialStatement AccountingStandard', 
+            'Forecast_FinancialStatement FiscalPeriodEnd',
+            'Forecast_FinancialStatement ReportType', 
+            'Forecast_FinancialStatement ModifyDate',
+            'Forecast_FinancialStatement CompanyType', 
+            'Forecast_Dividend RecordDate',
+            'Forecast_Dividend FiscalPeriodEnd', 
+            'Forecast_Dividend ReportType', 
+            'Forecast_Dividend ModifyDate', 
+            'Result_Dividend DividendPayableDate',
+            'Result_FinancialStatement ReportType'
+            ]
+        drops += fin_data.columns[fin_data.columns.str.endswith('Share')].values.tolist()
         fin_data = fin_data[[f for f in fin_data.columns.values.tolist() if f not in drops]]
         
-        # fillna
-        fin_data.fillna(method='ffill', inplace=True)
-        fin_data.fillna(method='bfill', inplace=True)
         return fin_data
 
     @classmethod
@@ -262,6 +278,10 @@ class ScoringService(object):
 
             return macd, exp3
 
+        # datetime features
+        feats['day'] = pd.to_datetime(feats['EndOfDayQuote Date']).dt.day
+        feats['dayofweek'] = pd.to_datetime(feats['EndOfDayQuote Date']).dt.dayofweek
+
         # minmax
         feats['price_min2max'] = feats['EndOfDayQuote Low'] / (feats['EndOfDayQuote High'] + 1)
         
@@ -269,11 +289,22 @@ class ScoringService(object):
         feats['price_open2close'] = feats['EndOfDayQuote Open'] / (feats['EndOfDayQuote Close'] + 1)
         
         # fのX営業日...
-        features = ["EndOfDayQuote ExchangeOfficialClose", 'EndOfDayQuote Volume', ]
-        new_feats = ['price_min2max', 'price_open2close']
+        features = [
+            "EndOfDayQuote ExchangeOfficialClose", 
+            'EndOfDayQuote Volume', 
+            'EndOfDayQuote ChangeFromPreviousClose', 
+            'EndOfDayQuote VWAP'
+            ]
+        new_feats = [
+            'price_min2max', 
+            'price_open2close', 
+            'day', 
+            'dayofweek', 
+            'EndOfDayQuote PercentChangeFromPreviousClose'
+            ]
         for i, f in enumerate(features):
             for x in [5, 10, 20, 40, ]:
-                # return 
+                # return
                 feats[f"{f}_return_{x}days"] = feats[
                     f
                 ].pct_change(x)
@@ -415,9 +446,13 @@ class ScoringService(object):
         feats['sector17'] = list_data['sector17'].values[-1]
         feats['sector33'] = list_data['sector33'].values[-1]
         feats['size_group'] = list_data['size_group'].values[-1]
-        feats['per_like'] = feats["EndOfDayQuote ExchangeOfficialClose"] / (feats["Result_FinancialStatement NetIncome"] + 1)
-        feats['pbr_like'] = feats["EndOfDayQuote ExchangeOfficialClose"] / (feats["Result_FinancialStatement NetAssets"] + 1)
+        feats['per_like'] = feats["EndOfDayQuote ExchangeOfficialClose"] / (feats["Result_FinancialStatement NetIncome"] + 0.001)
+        feats['pbr_like'] = feats["EndOfDayQuote ExchangeOfficialClose"] / (feats["Result_FinancialStatement NetAssets"] + 0.001)
         feats["roe_like"] = feats["pbr_like"] / (feats["per_like"] + 0.0001)
+
+        # fix share relative to stock price
+        # for f in [c for c in feats.columns[feats.columns.str.endswith('Share')].values.tolist()]:
+        #     feats[f] = feats[f] / feats["EndOfDayQuote ExchangeOfficialClose"]
         # feats["market_cap"] = feats["EndOfDayQuote ExchangeOfficialClose"] * list_data["share"]
         # feats["per"] = feats["EndOfDayQuote ExchangeOfficialClose"]/(feats["Result_FinancialStatement NetIncome"]*1000000 / (list_data["share"]+1))
         # feats["per"][feats["Result_FinancialStatement CashFlowsFromOperatingActivities"] == 0] = np.nan
@@ -425,13 +460,19 @@ class ScoringService(object):
         # feats["roe"] = feats["pbr"] / feats["per"]
 
         # drops
-        drops = ["EndOfDayQuote ExchangeOfficialClose", "EndOfDayQuote Volume", "Local Code"]
+        drops = [
+            "EndOfDayQuote ExchangeOfficialClose", 
+            'EndOfDayQuote Volume', 
+            'EndOfDayQuote ChangeFromPreviousClose', 
+            'EndOfDayQuote VWAP'
+        ]
+        drops += ["Local Code"]
         feats = feats[[f for f in feats.columns.values.tolist() if f not in drops]]
 
         # 欠損値処理を行います。
         feats = feats.replace([np.inf, -np.inf], np.nan)
-        feats.fillna(method='ffill', inplace=True)
-        feats.fillna(method='bfill', inplace=True)        
+#         feats.fillna(method='ffill', inplace=True)
+#         feats.fillna(method='bfill', inplace=True)        
 
         # 銘柄コードを設定
         feats["code"] = code
@@ -464,7 +505,13 @@ class ScoringService(object):
             "fundamental+technical": [f for f in train_X.columns.values.tolist() if f not in ['code', 
                             "Result_Dividend DividendPayableDate", "Local Code"]],
         }
-        return columns[column_group]
+        
+        feature_columns = columns[column_group]
+
+        # feature selections
+        feature_columns = [f for f in feature_columns if (train_X[f].isna().sum() < 0.5 * len(train_X)) & (train_X[f].std() > 0)]
+
+        return feature_columns
 
     @classmethod
     def compute_cv(cls, ypred, ytrue):
@@ -503,7 +550,7 @@ class ScoringService(object):
                 },
                 
             'lgb': {
-                'n_estimators': 24000,
+                'num_leaves': 129,
                 'objective': 'huber',
                 'boosting_type': 'gbdt',
                 'max_depth': 7,
@@ -513,8 +560,8 @@ class ScoringService(object):
                 'feature_fraction': 0.4,
                 'lambda_l1': 1,
                 'lambda_l2': 1,
+                'n_jobs': -1,
                 'seed': 42,
-                'early_stopping_rounds': 100,
                 'metric': 'mae'
                 },
 
@@ -524,7 +571,6 @@ class ScoringService(object):
                 'colsample_bylevel': 0.5,
                 'random_seed': 42,
                 'use_best_model': True,
-                'early_stopping_rounds': 100,
                 'loss_function': 'MAE',
                 'eval_metric': 'MAE',
                 },
@@ -541,9 +587,13 @@ class ScoringService(object):
         if 'xgb' in model_name:
             # fit
             model = xgb.XGBRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, 
-                eval_set=[(val_X[feature_columns], val_y)],
-                early_stopping_rounds=100, verbose=2)
+            if cls.IS_VAL:
+                model.fit(train_X[feature_columns], train_y, 
+                    eval_set=[(val_X[feature_columns], val_y)],
+                    early_stopping_rounds=100, verbose=2)
+            else:
+                model.fit(pd.concat([train_X[feature_columns], val_X[feature_columns]]),
+                    pd.concat([train_y, val_y]), verbose=2)
 
             # feature importance
             importance = model.get_booster().get_score(importance_type='gain')
@@ -563,9 +613,16 @@ class ScoringService(object):
         elif 'lgb' in model_name:
             # fit
             model = lgb.LGBMRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, eval_set=[(val_X[feature_columns], val_y)],
-                verbose=-1)
-            
+
+            if cls.IS_VAL:
+                model.fit(train_X[feature_columns], train_y, 
+                    eval_set=[(val_X[feature_columns], val_y)],
+                    early_stopping_rounds=100,
+                    verbose=-1)
+            else:
+                model.fit(pd.concat([train_X[feature_columns], val_X[feature_columns]]),
+                    pd.concat([train_y, val_y]), verbose=-1)
+
             # feature importance
             fi = model.booster_.feature_importance(importance_type="gain")
 
@@ -575,8 +632,15 @@ class ScoringService(object):
         elif 'catb' in model_name:
             # fit
             model = CatBoostRegressor(**params)
-            model.fit(train_X[feature_columns], train_y, eval_set=(val_X[feature_columns], val_y),
-                verbose=3000)
+
+            if cls.IS_VAL:
+                model.fit(train_X[feature_columns], train_y, 
+                    eval_set=(val_X[feature_columns], val_y),
+                    early_stopping_rounds=100,
+                    verbose=3000)
+            else:
+                model.fit(pd.concat([train_X[feature_columns], val_X[feature_columns]]),
+                    pd.concat([train_y, val_y]), verbose=-1)
 
             # feature importance
             fi = model.get_feature_importance()
@@ -601,6 +665,7 @@ class ScoringService(object):
         for code in codes:
             buff.append(cls.get_features_for_predict(cls.dfs, code))
         feature = pd.concat(buff)
+
         # 特徴量と目的変数を一致させて、データを分割
         train_X, train_y, val_X, val_y, test_X, test_y = cls.get_features_and_label(
             dfs, codes, feature, label
@@ -612,7 +677,8 @@ class ScoringService(object):
         params = cls.get_params(model_name)
         
         # model fitting
-        model, fi, pred_y = cls.fit_model(train_X, train_y, val_X, val_y, 
+        model, fi, pred_y = cls.fit_model(train_X, train_y, 
+                                          val_X, val_y, 
                                           feature_columns, 
                                           model_name=model_name)
         
@@ -715,7 +781,8 @@ class ScoringService(object):
             for label in labels:
 
                 # get model
-                model, fi_df, cvs = cls.create_model(cls.dfs, codes=codes, label=label, model_name=model_name)
+                model, fi_df, cvs = cls.create_model(cls.dfs, 
+                    codes=codes, label=label, model_name=model_name)
                 
                 # assign
                 fi_df = fi_df.rename(columns={'importance': f'{model_name}_{label}'})
@@ -810,7 +877,7 @@ class ScoringService(object):
 #                 assert label in df.columns.values.tolist()
 #                 assert f'{model_name}_{label}' in list(cls.models.keys())
                 
-                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / 25
+                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / 35
                 
         # 出力対象列に追加
         for label in ["label_high_20", "label_low_20"]:
