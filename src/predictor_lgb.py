@@ -19,11 +19,11 @@ class ScoringService(object):
     # 訓練期間終了日
     TRAIN_END = "2019-03-26"
     # 評価期間開始日
-    VAL_START = "2019-03-27" # "2019-02-01"
+    VAL_START = "2020-03-27" # "2019-02-01"
     # 評価期間終了日
-    VAL_END = "2019-12-31"
+    VAL_END = "2021-03-26"
     # テスト期間開始日
-    TEST_START = "2020-01-01"
+    TEST_START = "2021-03-27"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
     # compute cv?
