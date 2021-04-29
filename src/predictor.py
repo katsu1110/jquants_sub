@@ -23,7 +23,8 @@ class ScoringService(object):
     # 評価期間終了日
     VAL_END = "2021-03-26"
     # テスト期間開始日
-    TEST_START = "2020-01-01"
+    # TEST_START = "2020-01-01"
+    TEST_START = "2021-02-01"
     # 目的変数
     TARGET_LABELS = ["label_high_20", "label_low_20"]
     # compute cv?
@@ -57,19 +58,37 @@ class ScoringService(object):
                 "stock_fin": f"{dataset_dir}/stock_fin.csv.gz",
                 # "stock_fin_price": f"{dataset_dir}/stock_fin_price.csv.gz",
                 "stock_labels": f"{dataset_dir}/stock_labels.csv.gz",
+                # ニュースデータ
+                "tdnet": f"{dataset_dir}/tdnet.csv.gz",
+                "disclosureItems": f"{dataset_dir}/disclosureItems.csv.gz",
+                "nikkei_article": f"{dataset_dir}/nikkei_article.csv.gz",
+                "article": f"{dataset_dir}/article.csv.gz",
+                "industry": f"{dataset_dir}/industry.csv.gz",
+                "industry2": f"{dataset_dir}/industry2.csv.gz",
+                "region": f"{dataset_dir}/region.csv.gz",
+                "theme": f"{dataset_dir}/theme.csv.gz",
             }
         else:
             inputs = {
                 "stock_list": f"{dataset_dir}/stock_list.csv",
                 "stock_price": f"{dataset_dir}/stock_price.csv",
                 "stock_fin": f"{dataset_dir}/stock_fin.csv",
+                # ニュースデータ
+                "tdnet": f"{dataset_dir}/tdnet.csv",
+                "disclosureItems": f"{dataset_dir}/disclosureItems.csv",
+                "nikkei_article": f"{dataset_dir}/nikkei_article.csv",
+                "article": f"{dataset_dir}/article.csv",
+                "industry": f"{dataset_dir}/industry.csv",
+                "industry2": f"{dataset_dir}/industry2.csv",
+                "region": f"{dataset_dir}/region.csv",
+                "theme": f"{dataset_dir}/theme.csv",
                 # "stock_fin_price": f"{dataset_dir}/stock_fin_price.csv",
                 "stock_labels": f"{dataset_dir}/stock_labels.csv",
             }
         return inputs
 
     @classmethod
-    def get_dataset(cls, inputs):
+    def get_dataset(cls, inputs, load_data):
         """
         Args:
             inputs (list[str]): path to dataset files
@@ -79,6 +98,9 @@ class ScoringService(object):
         if cls.dfs is None:
             cls.dfs = {}
         for k, v in inputs.items():
+            # 必要なデータのみ読み込みます
+            if k not in load_data:
+                continue
             cls.dfs[k] = pd.read_csv(v)
             # DataFrameのindexを設定します。
             if k == "stock_price":
@@ -103,7 +125,9 @@ class ScoringService(object):
         """
         stock_list = dfs["stock_list"].copy()
         # 予測対象の銘柄コードを取得
-        cls.codes = stock_list[stock_list["prediction_target"] == True][
+        # cls.codes = stock_list[stock_list["prediction_target"] == True][
+        #     "Local Code"
+        cls.codes = stock_list[stock_list["universe_comp2"] == True][
             "Local Code"
         ].values
         return cls.codes
@@ -474,6 +498,10 @@ class ScoringService(object):
 #         feats.fillna(method='ffill', inplace=True)
 #         feats.fillna(method='bfill', inplace=True)        
 
+        # 特徴量を金曜日日付のみに絞り込む
+        feats = feats.resample("B").ffill()
+        feats = feats.loc[feats.index.dayofweek == 4]
+
         # 銘柄コードを設定
         feats["code"] = code
 
@@ -503,14 +531,15 @@ class ScoringService(object):
             "technical_only": technical_cols,
 #             "fundamental+technical": list(fundamental_cols) + list(technical_cols),
             "fundamental+technical": [f for f in train_X.columns.values.tolist() if f not in ['code', 
-                            "Result_Dividend DividendPayableDate", "Local Code"]],
+                            "universe_comp2", "Result_Dividend DividendPayableDate", "Local Code"]],
         }
         
         feature_columns = columns[column_group]
 
         # feature selections
         feature_columns = [f for f in feature_columns if (train_X[f].isna().sum() < 0.5 * len(train_X)) & (train_X[f].std() > 0)]
-
+        print('========= {:,} FEATURES TO USE =============='.format(len(feature_columns)))
+        print(feature_columns)
         return feature_columns
 
     @classmethod
@@ -802,8 +831,98 @@ class ScoringService(object):
         cls.save_fi_cv(feature_importance_df, cv_df, model_path=model_path)
 
     @classmethod
+    def get_exclude(
+        cls,
+        df_tdnet,  # tdnetのデータ
+        start_dt=None,  # データ取得対象の開始日、Noneの場合は制限なし
+        end_dt=None,  # データ取得対象の終了日、Noneの場合は制限なし
+        lookback=7,  # 除外考慮期間 (days)
+        target_day_of_week=4,  # 起点となる曜日
+    ):
+        # 特別損失のレコードを取得
+        special_loss = df_tdnet[df_tdnet["disclosureItems"].str.contains('201"')].copy()
+        # 日付型を調整
+        special_loss["date"] = pd.to_datetime(special_loss["disclosedDate"])
+        # 処理対象開始日が設定されていない場合はデータの最初の日付を取得
+        if start_dt is None:
+            start_dt = special_loss["date"].iloc[0]
+        # 処理対象終了日が設定されていない場合はデータの最後の日付を取得
+        if end_dt is None:
+            end_dt = special_loss["date"].iloc[-1]
+        #  処理対象日で絞り込み
+        special_loss = special_loss[
+            (start_dt <= special_loss["date"]) & (special_loss["date"] <= end_dt)
+        ]
+        # 出力用にカラムを調整
+        res = special_loss[["code", "disclosedDate", "date"]].copy()
+        # 銘柄コードを4桁にする
+        res["code"] = res["code"].astype(str).str[:-1]
+        # 予測の基準となる金曜日の日付にするために調整
+        res["remain"] = (target_day_of_week - res["date"].dt.dayofweek) % 7
+        res["start_dt"] = res["date"] + pd.to_timedelta(res["remain"], unit="d")
+        res["end_dt"] = res["start_dt"] + pd.Timedelta(days=lookback)
+        columns = ["code", "date", "start_dt", "end_dt"]
+        return res[columns].reset_index(drop=True)
+
+    @classmethod
+    def strategy(cls, strategy_id, df, df_tdnet):
+        df = df.copy()
+        # 銘柄選択方法選択
+        if strategy_id in [1, 4]:
+            # 最高値モデル +　最安値モデル
+            df.loc[:, "pred"] = df.loc[:, "label_high_20"] + df.loc[:, "label_low_20"]
+        elif strategy_id in [2, 5]:
+            # 最高値モデル
+            df.loc[:, "pred"] = df.loc[:, "label_high_20"]
+        elif strategy_id in [3, 6]:
+            # 最高値モデル
+            df.loc[:, "pred"] = df.loc[:, "label_low_20"]
+        else:
+            raise ValueError("no strategy_id selected")
+
+        # 特別損失を除外する場合
+        if strategy_id in [4, 5, 6]:
+            # 特別損失が発生した銘柄一覧を取得
+            df_exclude = cls.get_exclude(df_tdnet)
+            # 除外用にユニークな列を作成します。
+            df_exclude.loc[:, "date-code_lastweek"] = (
+                df_exclude.loc[:, "start_dt"].dt.strftime("%Y-%m-%d-")
+                + df_exclude.loc[:, "code"]
+            )
+            df_exclude.loc[:, "date-code_thisweek"] = (
+                df_exclude.loc[:, "end_dt"].dt.strftime("%Y-%m-%d-")
+                + df_exclude.loc[:, "code"]
+            )
+            df.loc[:, "date-code_lastweek"] = (df.index - pd.Timedelta("7D")).strftime(
+                "%Y-%m-%d-"
+            ) + df.loc[:, "code"].astype(str)
+            df.loc[:, "date-code_thisweek"] = df.index.strftime("%Y-%m-%d-") + df.loc[
+                :, "code"
+            ].astype(str)
+            # 特別損失銘柄を除外
+            df = df.loc[
+                ~df.loc[:, "date-code_lastweek"].isin(
+                    df_exclude.loc[:, "date-code_lastweek"]
+                )
+            ]
+            df = df.loc[
+                ~df.loc[:, "date-code_thisweek"].isin(
+                    df_exclude.loc[:, "date-code_thisweek"]
+                )
+            ]
+
+        # 予測出力を降順に並び替え
+        df = df.sort_values("pred", ascending=False)
+        # 予測出力の大きいものを取得
+        df = df.groupby("datetime").head(30)
+
+        return df
+
+    @classmethod
     def predict(cls, inputs, labels=None, model_names=None, codes=None, 
-                model_path="../model", start_dt=TEST_START):
+                model_path="../model", start_dt=TEST_START, 
+                load_data=["stock_list", "stock_fin", "stock_fin_price", "stock_price", "tdnet"],
+                strategy_id=4,):
         """Predict method
 
         Args:
@@ -817,7 +936,7 @@ class ScoringService(object):
 
         # データ読み込み
         if cls.dfs is None:
-            cls.get_dataset(inputs)
+            cls.get_dataset(inputs, load_data)
             cls.get_codes(cls.dfs)
 
         # 予測対象の銘柄コードと目的変数を設定
@@ -827,6 +946,20 @@ class ScoringService(object):
             labels = cls.TARGET_LABELS
         if model_names is None:
             model_names = cls.MODEL_NAMES
+
+        if "purchase_date" in inputs.keys():
+            # ランタイム環境では指定された投資対象日付を使用します
+            # purchase_dateを読み込み
+            df_purchase_date = pd.read_csv(inputs["purchase_date"])
+            # purchase_dateの最も古い日付を設定
+            start_dt = pd.Timestamp(
+                df_purchase_date.sort_values("Purchase Date").iloc[0, 0]
+            )
+
+        # 予測対象日を調整
+        # start_dtにはポートフォリオの購入日を指定しているため、
+        # 予測に使用する前週の金曜日を指定します。
+        start_dt = pd.Timestamp(start_dt) - pd.Timedelta("3D")
 
         # 特徴量を作成
         buff = []
@@ -842,16 +975,21 @@ class ScoringService(object):
 
         # 日付と銘柄コードに絞り込み
         df = feats.loc[:, ["code"]].copy()
-        # codeを出力形式の１列目と一致させる
-        df.loc[:, "code"] = df.index.strftime("%Y-%m-%d-") + df.loc[:, "code"].astype(
-            str
-        )
+        # 購入金額を設定 (ここでは一律50000とする)
+        df.loc[:, "budget"] = 50000
+
+        # # codeを出力形式の１列目と一致させる
+        # df.loc[:, "code"] = df.index.strftime("%Y-%m-%d-") + df.loc[:, "code"].astype(
+        #     str
+        # )
 
         # 出力対象列を定義
-        output_columns = ["code"]
+        # output_columns = ["code"]
+        output_columns = ["date", "Local Code", "budget"]
 
         # 特徴量カラムを指定
-        feature_columns = cls.get_feature_columns(cls.dfs, feats)
+        # feature_columns = cls.get_feature_columns(cls.dfs, feats)
+        feature_columns = ['price_min2max', 'price_open2close', 'day', 'dayofweek', 'EndOfDayQuote PercentChangeFromPreviousClose', 'EndOfDayQuote ExchangeOfficialClose_return_5days', 'EndOfDayQuote ExchangeOfficialClose_volatility_5days', 'EndOfDayQuote ExchangeOfficialClose_skew_5days', 'EndOfDayQuote ExchangeOfficialClose_kurt_5days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_return_10days', 'EndOfDayQuote ExchangeOfficialClose_volatility_10days', 'EndOfDayQuote ExchangeOfficialClose_skew_10days', 'EndOfDayQuote ExchangeOfficialClose_kurt_10days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_return_20days', 'EndOfDayQuote ExchangeOfficialClose_volatility_20days', 'EndOfDayQuote ExchangeOfficialClose_skew_20days', 'EndOfDayQuote ExchangeOfficialClose_kurt_20days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_return_40days', 'EndOfDayQuote ExchangeOfficialClose_volatility_40days', 'EndOfDayQuote ExchangeOfficialClose_skew_40days', 'EndOfDayQuote ExchangeOfficialClose_kurt_40days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_40days', 'EndOfDayQuote Volume_return_5days', 'EndOfDayQuote Volume_volatility_5days', 'EndOfDayQuote Volume_skew_5days', 'EndOfDayQuote Volume_kurt_5days', 'EndOfDayQuote Volume_MA_gap_5days', 'EndOfDayQuote Volume_MAmax_gap_5days', 'EndOfDayQuote Volume_return_10days', 'EndOfDayQuote Volume_volatility_10days', 'EndOfDayQuote Volume_skew_10days', 'EndOfDayQuote Volume_kurt_10days', 'EndOfDayQuote Volume_MA_gap_10days', 'EndOfDayQuote Volume_MAmax_gap_10days', 'EndOfDayQuote Volume_return_20days', 'EndOfDayQuote Volume_volatility_20days', 'EndOfDayQuote Volume_skew_20days', 'EndOfDayQuote Volume_kurt_20days', 'EndOfDayQuote Volume_MA_gap_20days', 'EndOfDayQuote Volume_MAmax_gap_20days', 'EndOfDayQuote Volume_return_40days', 'EndOfDayQuote Volume_volatility_40days', 'EndOfDayQuote Volume_skew_40days', 'EndOfDayQuote Volume_kurt_40days', 'EndOfDayQuote Volume_MA_gap_40days', 'EndOfDayQuote Volume_MAmax_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_return_5days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_5days', 'EndOfDayQuote ChangeFromPreviousClose_skew_5days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_5days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_return_10days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_return_20days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_return_40days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_40days', 'EndOfDayQuote VWAP_return_5days', 'EndOfDayQuote VWAP_volatility_5days', 'EndOfDayQuote VWAP_skew_5days', 'EndOfDayQuote VWAP_kurt_5days', 'EndOfDayQuote VWAP_MA_gap_5days', 'EndOfDayQuote VWAP_MAmax_gap_5days', 'EndOfDayQuote VWAP_return_10days', 'EndOfDayQuote VWAP_volatility_10days', 'EndOfDayQuote VWAP_skew_10days', 'EndOfDayQuote VWAP_kurt_10days', 'EndOfDayQuote VWAP_MA_gap_10days', 'EndOfDayQuote VWAP_MAmax_gap_10days', 'EndOfDayQuote VWAP_return_20days', 'EndOfDayQuote VWAP_volatility_20days', 'EndOfDayQuote VWAP_skew_20days', 'EndOfDayQuote VWAP_kurt_20days', 'EndOfDayQuote VWAP_MA_gap_20days', 'EndOfDayQuote VWAP_MAmax_gap_20days', 'EndOfDayQuote VWAP_return_40days', 'EndOfDayQuote VWAP_volatility_40days', 'EndOfDayQuote VWAP_skew_40days', 'EndOfDayQuote VWAP_kurt_40days', 'EndOfDayQuote VWAP_MA_gap_40days', 'EndOfDayQuote VWAP_MAmax_gap_40days', 'RSI', 'MACD', 'MACD_9', 'MACD_d', 'Result_FinancialStatement AccountingStandard', 'Result_FinancialStatement FiscalYear', 'Result_FinancialStatement CompanyType', 'Result_FinancialStatement NetSales', 'Result_FinancialStatement OperatingIncome', 'Result_FinancialStatement OrdinaryIncome', 'Result_FinancialStatement NetIncome', 'Result_FinancialStatement TotalAssets', 'Result_FinancialStatement NetAssets', 'Forecast_FinancialStatement NetSales', 'Forecast_FinancialStatement OperatingIncome', 'Forecast_FinancialStatement OrdinaryIncome', 'Forecast_FinancialStatement NetIncome', 'profit_margin', 'equity_ratio', 'sector17', 'sector33', 'size_group', 'per_like', 'pbr_like', 'roe_like']
         print('{:,} features: {}'.format(len(feature_columns), feature_columns))
         
         # # get model
@@ -860,7 +998,7 @@ class ScoringService(object):
         # 目的変数毎に予測
         for label in ["label_high_20", "label_low_20"]:
             df[label] = 0
-        
+
         num_models = len(model_names) * len(labels) // 2 
         sum_weights = 0
         for label in labels:
@@ -879,11 +1017,24 @@ class ScoringService(object):
                 
                 df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / 35
                 
+        # 銘柄選択方法選択
+        df = cls.strategy(strategy_id, df, cls.dfs["tdnet"])
+        
+        # 日付順に並び替え
+        df.sort_index(kind="mergesort", inplace=True)
+        # 月曜日日付に変更
+        df.index = df.index + pd.Timedelta("3D")
+        # 出力用に調整
+        df.index.name = "date"
+        df.rename(columns={"code": "Local Code"}, inplace=True)
+        df.reset_index(inplace=True)
+        
         # 出力対象列に追加
         for label in ["label_high_20", "label_low_20"]:
             output_columns.append(label)
 
         out = io.StringIO()
-        df.to_csv(out, header=False, index=False, columns=output_columns)
+        # df.to_csv(out, header=False, index=False, columns=output_columns)
+        df.to_csv(out, header=True, index=False, columns=output_columns)
 
         return out.getvalue()
