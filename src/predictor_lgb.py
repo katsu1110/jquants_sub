@@ -360,12 +360,12 @@ class ScoringService(object):
                              ]
 
         # RSI
-        rsi = rsi(feats["EndOfDayQuote ExchangeOfficialClose"], 14)
-        feats['RSI'] = rsi.values
+        rsi_vec = rsi(feats["EndOfDayQuote ExchangeOfficialClose"], 14)
+        feats['RSI'] = rsi_vec.values
 
         # MACD
-        macd, exp3 = macd(feats["EndOfDayQuote ExchangeOfficialClose"], 12, 26)
-        feats['MACD'] = macd.values
+        macd_vec, exp3 = macd(feats["EndOfDayQuote ExchangeOfficialClose"], 12, 26)
+        feats['MACD'] = macd_vec.values
         feats['MACD_9'] = exp3.values
         feats['MACD_d'] = feats['MACD'] / (feats['MACD_9'] + 0.001)
         

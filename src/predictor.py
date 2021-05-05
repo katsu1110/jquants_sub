@@ -384,12 +384,12 @@ class ScoringService(object):
                              ]
 
         # RSI
-        rsi = rsi(feats["EndOfDayQuote ExchangeOfficialClose"], 14)
-        feats['RSI'] = rsi.values
+        rsi_vec = rsi(feats["EndOfDayQuote ExchangeOfficialClose"], 14)
+        feats['RSI'] = rsi_vec.values
 
         # MACD
-        macd, exp3 = macd(feats["EndOfDayQuote ExchangeOfficialClose"], 12, 26)
-        feats['MACD'] = macd.values
+        macd_vec, exp3 = macd(feats["EndOfDayQuote ExchangeOfficialClose"], 12, 26)
+        feats['MACD'] = macd_vec.values
         feats['MACD_9'] = exp3.values
         feats['MACD_d'] = feats['MACD'] / (feats['MACD_9'] + 0.001)
         
@@ -870,7 +870,7 @@ class ScoringService(object):
         # 銘柄選択方法選択
         if strategy_id in [1, 4]:
             # 最高値モデル +　最安値モデル
-            df.loc[:, "pred"] = df.loc[:, "label_high_20"] + df.loc[:, "label_low_20"]
+            df.loc[:, "pred"] = 0.9*df.loc[:, "label_high_20"].rank(pct=True) + 0.1*df.loc[:, "label_low_20"].rank(pct=True)
         elif strategy_id in [2, 5]:
             # 最高値モデル
             df.loc[:, "pred"] = df.loc[:, "label_high_20"]
@@ -1029,9 +1029,9 @@ class ScoringService(object):
         df.rename(columns={"code": "Local Code"}, inplace=True)
         df.reset_index(inplace=True)
         
-        # 出力対象列に追加
-        for label in ["label_high_20", "label_low_20"]:
-            output_columns.append(label)
+        # # 出力対象列に追加
+        # for label in ["label_high_20", "label_low_20"]:
+        #     output_columns.append(label)
 
         out = io.StringIO()
         # df.to_csv(out, header=False, index=False, columns=output_columns)
