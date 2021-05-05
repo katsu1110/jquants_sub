@@ -870,7 +870,7 @@ class ScoringService(object):
         # 銘柄選択方法選択
         if strategy_id in [1, 4]:
             # 最高値モデル +　最安値モデル
-            df.loc[:, "pred"] = 0.9*df.loc[:, "label_high_20"].rank(pct=True) + 0.1*df.loc[:, "label_low_20"].rank(pct=True)
+            df.loc[:, "pred"] = 1.2*df.loc[:, "label_high_20"].rank(pct=True) - 0.2*df.loc[:, "label_low_20"].rank(pct=True)
         elif strategy_id in [2, 5]:
             # 最高値モデル
             df.loc[:, "pred"] = df.loc[:, "label_high_20"]
@@ -1000,9 +1000,11 @@ class ScoringService(object):
             df[label] = 0
 
         num_models = len(model_names) * len(labels) // 2 
-        sum_weights = 0
+        sum_weights = 0.35
+        # sum_weights = 3
         for label in labels:
-            weight = int(label.split('_')[-1])
+            weight = 1 / int(label.split('_')[-1])
+            # weight = 1
             if 'high' in label:
                 label_ = "label_high_20"
             elif 'low' in label:
@@ -1015,7 +1017,7 @@ class ScoringService(object):
 #                 assert label in df.columns.values.tolist()
 #                 assert f'{model_name}_{label}' in list(cls.models.keys())
                 
-                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / 35
+                df[label_] += cls.models[f'{model_name}_{label}'].predict(feats[feature_columns]) * weight / sum_weights 
                 
         # 銘柄選択方法選択
         df = cls.strategy(strategy_id, df, cls.dfs["tdnet"])
