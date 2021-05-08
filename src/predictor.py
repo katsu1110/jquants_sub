@@ -570,8 +570,8 @@ class ScoringService(object):
     @classmethod
     def get_params(cls, model_name):
         params = {
-            'xgb': {
-                'colsample_bytree': 0.1,                 
+             'xgb': {
+                'colsample_bytree': 0.2,                 
                 'learning_rate': 0.08,
                 'max_depth': 7,
                 'subsample': 1,
