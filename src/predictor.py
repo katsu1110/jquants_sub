@@ -21,7 +21,7 @@ class ScoringService(object):
     # 評価期間開始日
     VAL_START = "2020-03-27" # "2019-02-01"
     # 評価期間終了日
-    VAL_END = "2021-03-26"
+    VAL_END = "2021-04-30"
     # テスト期間開始日
     # TEST_START = "2020-01-01"
     TEST_START = "2021-02-01"
@@ -34,7 +34,8 @@ class ScoringService(object):
         TARGET_LABELS += [f'label_high_{i}', f'label_low_{i}']
     
     # model names
-    MODEL_NAMES = ['lgb', ]
+    # MODEL_NAMES = ['lgb', ]
+    MODEL_NAMES = ['lgb', 'xgb', 'catb']
 
     # データをこの変数に読み込む
     dfs = None
@@ -336,15 +337,16 @@ class ScoringService(object):
                 # volatility
                 feats[f"{f}_volatility_{x}days"] = (
                     np.log1p(feats[f])
-                    .diff()
+                    .pct_change()
                     .rolling(x)
                     .std()
                 )
-
+                feats[f"{f}_exmstd_{x}days"] = pd.Series.ewm(np.log1p(feats[f]).pct_change(), span=x).std()
+                
                 # skew
                 feats[f"{f}_skew_{x}days"] = (
                     np.log1p(feats[f])
-                    .diff()
+                    .pct_change()
                     .rolling(x)
                     .skew()
                 )
@@ -352,7 +354,7 @@ class ScoringService(object):
                 # kurt
                 feats[f"{f}_kurt_{x}days"] = (
                     np.log1p(feats[f])
-                    .diff()
+                    .pct_change()
                     .rolling(x)
                     .kurt()
                 )
@@ -360,6 +362,9 @@ class ScoringService(object):
                 # kairi mean
                 feats[f"{f}_MA_gap_{x}days"] = feats[f] / (
                     feats[f].rolling(x).mean()
+                )
+                feats[f"{f}_EMA_gap_{x}days"] = feats[f] / (
+                    pd.Series.ewm(feats[f], span=x).mean()
                 )
                 
                 # kairi max
@@ -376,9 +381,11 @@ class ScoringService(object):
                 new_feats += [
                     f"{f}_return_{x}days", 
                     f"{f}_volatility_{x}days",
+                    f"{f}_exmstd_{x}days",
                     f"{f}_skew_{x}days", 
                     f"{f}_kurt_{x}days", 
                     f"{f}_MA_gap_{x}days",
+                    f"{f}_EMA_gap_{x}days",
                     f"{f}_MAmax_gap_{x}days",
                     # f"{f}_MAmin_gap_{x}days",
                              ]
@@ -564,7 +571,7 @@ class ScoringService(object):
     def get_params(cls, model_name):
         params = {
             'xgb': {
-                'colsample_bytree': 0.7,                 
+                'colsample_bytree': 0.1,                 
                 'learning_rate': 0.08,
                 'max_depth': 7,
                 'subsample': 1,
@@ -573,7 +580,7 @@ class ScoringService(object):
                 'alpha': 1,
                 'lambda': 1,
                 'seed': 42,
-                'n_estimators': 24000,
+                'n_estimators': 10000,
                 "objective": 'reg:pseudohubererror',
                 "eval_metric": "mae"
                 },
@@ -586,7 +593,7 @@ class ScoringService(object):
                 'learning_rate': 0.08,
                 'subsample': 0.72,
                 'subsample_freq': 4,
-                'feature_fraction': 0.7,
+                'feature_fraction': 0.4,
                 'lambda_l1': 1,
                 'lambda_l2': 1,
                 'n_jobs': -1,
@@ -596,10 +603,9 @@ class ScoringService(object):
 
             'catb': { 'task_type': "CPU",
                 'learning_rate': 0.08, 
-                'iterations': 24000,
-                'colsample_bylevel': 0.5,
+                'iterations': 10000,
+                'colsample_bylevel': 0.7,
                 'random_seed': 42,
-                'use_best_model': True,
                 'loss_function': 'MAE',
                 'eval_metric': 'MAE',
                 },
@@ -614,13 +620,14 @@ class ScoringService(object):
         
         # fit
         if 'xgb' in model_name:
-            # fit
-            model = xgb.XGBRegressor(**params)
             if cls.IS_VAL:
+                model = xgb.XGBRegressor(**params)
                 model.fit(train_X[feature_columns], train_y, 
                     eval_set=[(val_X[feature_columns], val_y)],
                     early_stopping_rounds=100, verbose=2)
             else:
+                params['n_estimators'] = 511
+                model = xgb.XGBRegressor(**params)
                 model.fit(pd.concat([train_X[feature_columns], val_X[feature_columns]]),
                     pd.concat([train_y, val_y]), verbose=2)
 
@@ -660,16 +667,17 @@ class ScoringService(object):
             
         elif 'catb' in model_name:
             # fit
-            model = CatBoostRegressor(**params)
-
             if cls.IS_VAL:
+                model = CatBoostRegressor(**params)
                 model.fit(train_X[feature_columns], train_y, 
                     eval_set=(val_X[feature_columns], val_y),
                     early_stopping_rounds=100,
                     verbose=3000)
             else:
+                params['iterations'] = 511
+                model = CatBoostRegressor(**params)
                 model.fit(pd.concat([train_X[feature_columns], val_X[feature_columns]]),
-                    pd.concat([train_y, val_y]), verbose=-1)
+                    pd.concat([train_y, val_y]), verbose=500)
 
             # feature importance
             fi = model.get_feature_importance()
@@ -870,7 +878,7 @@ class ScoringService(object):
         # 銘柄選択方法選択
         if strategy_id in [1, 4]:
             # 最高値モデル +　最安値モデル
-            df.loc[:, "pred"] = 1.2*df.loc[:, "label_high_20"].rank(pct=True) - 0.2*df.loc[:, "label_low_20"].rank(pct=True)
+            df.loc[:, "pred"] = 2*df.loc[:, "label_high_20"].rank(pct=True) - df.loc[:, "label_low_20"].rank(pct=True)
         elif strategy_id in [2, 5]:
             # 最高値モデル
             df.loc[:, "pred"] = df.loc[:, "label_high_20"]
@@ -976,7 +984,7 @@ class ScoringService(object):
         # 日付と銘柄コードに絞り込み
         df = feats.loc[:, ["code"]].copy()
         # 購入金額を設定 (ここでは一律50000とする)
-        df.loc[:, "budget"] = 50000
+        df.loc[:, "budget"] = 80000
 
         # # codeを出力形式の１列目と一致させる
         # df.loc[:, "code"] = df.index.strftime("%Y-%m-%d-") + df.loc[:, "code"].astype(
@@ -989,7 +997,7 @@ class ScoringService(object):
 
         # 特徴量カラムを指定
         # feature_columns = cls.get_feature_columns(cls.dfs, feats)
-        feature_columns = ['price_min2max', 'price_open2close', 'day', 'dayofweek', 'EndOfDayQuote PercentChangeFromPreviousClose', 'EndOfDayQuote ExchangeOfficialClose_return_5days', 'EndOfDayQuote ExchangeOfficialClose_volatility_5days', 'EndOfDayQuote ExchangeOfficialClose_skew_5days', 'EndOfDayQuote ExchangeOfficialClose_kurt_5days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_return_10days', 'EndOfDayQuote ExchangeOfficialClose_volatility_10days', 'EndOfDayQuote ExchangeOfficialClose_skew_10days', 'EndOfDayQuote ExchangeOfficialClose_kurt_10days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_return_20days', 'EndOfDayQuote ExchangeOfficialClose_volatility_20days', 'EndOfDayQuote ExchangeOfficialClose_skew_20days', 'EndOfDayQuote ExchangeOfficialClose_kurt_20days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_return_40days', 'EndOfDayQuote ExchangeOfficialClose_volatility_40days', 'EndOfDayQuote ExchangeOfficialClose_skew_40days', 'EndOfDayQuote ExchangeOfficialClose_kurt_40days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_return_60days', 'EndOfDayQuote ExchangeOfficialClose_volatility_60days', 'EndOfDayQuote ExchangeOfficialClose_skew_60days', 'EndOfDayQuote ExchangeOfficialClose_kurt_60days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_60days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_60days', 'EndOfDayQuote Volume_return_5days', 'EndOfDayQuote Volume_volatility_5days', 'EndOfDayQuote Volume_skew_5days', 'EndOfDayQuote Volume_kurt_5days', 'EndOfDayQuote Volume_MA_gap_5days', 'EndOfDayQuote Volume_MAmax_gap_5days', 'EndOfDayQuote Volume_return_10days', 'EndOfDayQuote Volume_volatility_10days', 'EndOfDayQuote Volume_skew_10days', 'EndOfDayQuote Volume_kurt_10days', 'EndOfDayQuote Volume_MA_gap_10days', 'EndOfDayQuote Volume_MAmax_gap_10days', 'EndOfDayQuote Volume_return_20days', 'EndOfDayQuote Volume_volatility_20days', 'EndOfDayQuote Volume_skew_20days', 'EndOfDayQuote Volume_kurt_20days', 'EndOfDayQuote Volume_MA_gap_20days', 'EndOfDayQuote Volume_MAmax_gap_20days', 'EndOfDayQuote Volume_return_40days', 'EndOfDayQuote Volume_volatility_40days', 'EndOfDayQuote Volume_skew_40days', 'EndOfDayQuote Volume_kurt_40days', 'EndOfDayQuote Volume_MA_gap_40days', 'EndOfDayQuote Volume_MAmax_gap_40days', 'EndOfDayQuote Volume_return_60days', 'EndOfDayQuote Volume_volatility_60days', 'EndOfDayQuote Volume_skew_60days', 'EndOfDayQuote Volume_kurt_60days', 'EndOfDayQuote Volume_MA_gap_60days', 'EndOfDayQuote Volume_MAmax_gap_60days', 'EndOfDayQuote ChangeFromPreviousClose_return_5days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_5days', 'EndOfDayQuote ChangeFromPreviousClose_skew_5days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_5days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_return_10days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_return_20days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_return_40days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_return_60days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_60days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_60days', 'EndOfDayQuote VWAP_return_5days', 'EndOfDayQuote VWAP_volatility_5days', 'EndOfDayQuote VWAP_skew_5days', 'EndOfDayQuote VWAP_kurt_5days', 'EndOfDayQuote VWAP_MA_gap_5days', 'EndOfDayQuote VWAP_MAmax_gap_5days', 'EndOfDayQuote VWAP_return_10days', 'EndOfDayQuote VWAP_volatility_10days', 'EndOfDayQuote VWAP_skew_10days', 'EndOfDayQuote VWAP_kurt_10days', 'EndOfDayQuote VWAP_MA_gap_10days', 'EndOfDayQuote VWAP_MAmax_gap_10days', 'EndOfDayQuote VWAP_return_20days', 'EndOfDayQuote VWAP_volatility_20days', 'EndOfDayQuote VWAP_skew_20days', 'EndOfDayQuote VWAP_kurt_20days', 'EndOfDayQuote VWAP_MA_gap_20days', 'EndOfDayQuote VWAP_MAmax_gap_20days', 'EndOfDayQuote VWAP_return_40days', 'EndOfDayQuote VWAP_volatility_40days', 'EndOfDayQuote VWAP_skew_40days', 'EndOfDayQuote VWAP_kurt_40days', 'EndOfDayQuote VWAP_MA_gap_40days', 'EndOfDayQuote VWAP_MAmax_gap_40days', 'EndOfDayQuote VWAP_return_60days', 'EndOfDayQuote VWAP_volatility_60days', 'EndOfDayQuote VWAP_skew_60days', 'EndOfDayQuote VWAP_kurt_60days', 'EndOfDayQuote VWAP_MA_gap_60days', 'EndOfDayQuote VWAP_MAmax_gap_60days', 'RSI', 'MACD', 'MACD_9', 'MACD_d', 'Result_FinancialStatement AccountingStandard', 'Result_FinancialStatement FiscalYear', 'Result_FinancialStatement CompanyType', 'Result_FinancialStatement NetSales', 'Result_FinancialStatement OperatingIncome', 'Result_FinancialStatement OrdinaryIncome', 'Result_FinancialStatement NetIncome', 'Result_FinancialStatement TotalAssets', 'Result_FinancialStatement NetAssets', 'Forecast_FinancialStatement NetSales', 'Forecast_FinancialStatement OperatingIncome', 'Forecast_FinancialStatement OrdinaryIncome', 'Forecast_FinancialStatement NetIncome', 'profit_margin', 'equity_ratio', 'sector17', 'sector33', 'size_group', 'per_like', 'pbr_like', 'roe_like']
+        feature_columns = ['price_min2max', 'price_open2close', 'day', 'dayofweek', 'EndOfDayQuote PercentChangeFromPreviousClose', 'EndOfDayQuote ExchangeOfficialClose_return_5days', 'EndOfDayQuote ExchangeOfficialClose_volatility_5days', 'EndOfDayQuote ExchangeOfficialClose_exmstd_5days', 'EndOfDayQuote ExchangeOfficialClose_skew_5days', 'EndOfDayQuote ExchangeOfficialClose_kurt_5days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_EMA_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_5days', 'EndOfDayQuote ExchangeOfficialClose_return_10days', 'EndOfDayQuote ExchangeOfficialClose_volatility_10days', 'EndOfDayQuote ExchangeOfficialClose_exmstd_10days', 'EndOfDayQuote ExchangeOfficialClose_skew_10days', 'EndOfDayQuote ExchangeOfficialClose_kurt_10days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_EMA_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_10days', 'EndOfDayQuote ExchangeOfficialClose_return_20days', 'EndOfDayQuote ExchangeOfficialClose_volatility_20days', 'EndOfDayQuote ExchangeOfficialClose_exmstd_20days', 'EndOfDayQuote ExchangeOfficialClose_skew_20days', 'EndOfDayQuote ExchangeOfficialClose_kurt_20days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_EMA_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_20days', 'EndOfDayQuote ExchangeOfficialClose_return_40days', 'EndOfDayQuote ExchangeOfficialClose_volatility_40days', 'EndOfDayQuote ExchangeOfficialClose_exmstd_40days', 'EndOfDayQuote ExchangeOfficialClose_skew_40days', 'EndOfDayQuote ExchangeOfficialClose_kurt_40days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_EMA_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_40days', 'EndOfDayQuote ExchangeOfficialClose_return_60days', 'EndOfDayQuote ExchangeOfficialClose_volatility_60days', 'EndOfDayQuote ExchangeOfficialClose_exmstd_60days', 'EndOfDayQuote ExchangeOfficialClose_skew_60days', 'EndOfDayQuote ExchangeOfficialClose_kurt_60days', 'EndOfDayQuote ExchangeOfficialClose_MA_gap_60days', 'EndOfDayQuote ExchangeOfficialClose_EMA_gap_60days', 'EndOfDayQuote ExchangeOfficialClose_MAmax_gap_60days', 'EndOfDayQuote Volume_return_5days', 'EndOfDayQuote Volume_volatility_5days', 'EndOfDayQuote Volume_exmstd_5days', 'EndOfDayQuote Volume_skew_5days', 'EndOfDayQuote Volume_kurt_5days', 'EndOfDayQuote Volume_MA_gap_5days', 'EndOfDayQuote Volume_EMA_gap_5days', 'EndOfDayQuote Volume_MAmax_gap_5days', 'EndOfDayQuote Volume_return_10days', 'EndOfDayQuote Volume_volatility_10days', 'EndOfDayQuote Volume_exmstd_10days', 'EndOfDayQuote Volume_skew_10days', 'EndOfDayQuote Volume_kurt_10days', 'EndOfDayQuote Volume_MA_gap_10days', 'EndOfDayQuote Volume_EMA_gap_10days', 'EndOfDayQuote Volume_MAmax_gap_10days', 'EndOfDayQuote Volume_return_20days', 'EndOfDayQuote Volume_volatility_20days', 'EndOfDayQuote Volume_exmstd_20days', 'EndOfDayQuote Volume_skew_20days', 'EndOfDayQuote Volume_kurt_20days', 'EndOfDayQuote Volume_MA_gap_20days', 'EndOfDayQuote Volume_EMA_gap_20days', 'EndOfDayQuote Volume_MAmax_gap_20days', 'EndOfDayQuote Volume_return_40days', 'EndOfDayQuote Volume_volatility_40days', 'EndOfDayQuote Volume_exmstd_40days', 'EndOfDayQuote Volume_skew_40days', 'EndOfDayQuote Volume_kurt_40days', 'EndOfDayQuote Volume_MA_gap_40days', 'EndOfDayQuote Volume_EMA_gap_40days', 'EndOfDayQuote Volume_MAmax_gap_40days', 'EndOfDayQuote Volume_return_60days', 'EndOfDayQuote Volume_volatility_60days', 'EndOfDayQuote Volume_exmstd_60days', 'EndOfDayQuote Volume_skew_60days', 'EndOfDayQuote Volume_kurt_60days', 'EndOfDayQuote Volume_MA_gap_60days', 'EndOfDayQuote Volume_EMA_gap_60days', 'EndOfDayQuote Volume_MAmax_gap_60days', 'EndOfDayQuote ChangeFromPreviousClose_return_5days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_5days', 'EndOfDayQuote ChangeFromPreviousClose_exmstd_5days', 'EndOfDayQuote ChangeFromPreviousClose_skew_5days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_5days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_EMA_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_5days', 'EndOfDayQuote ChangeFromPreviousClose_return_10days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_10days', 'EndOfDayQuote ChangeFromPreviousClose_exmstd_10days', 'EndOfDayQuote ChangeFromPreviousClose_skew_10days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_10days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_EMA_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_10days', 'EndOfDayQuote ChangeFromPreviousClose_return_20days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_20days', 'EndOfDayQuote ChangeFromPreviousClose_exmstd_20days', 'EndOfDayQuote ChangeFromPreviousClose_skew_20days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_20days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_EMA_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_20days', 'EndOfDayQuote ChangeFromPreviousClose_return_40days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_40days', 'EndOfDayQuote ChangeFromPreviousClose_exmstd_40days', 'EndOfDayQuote ChangeFromPreviousClose_skew_40days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_40days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_EMA_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_40days', 'EndOfDayQuote ChangeFromPreviousClose_return_60days', 'EndOfDayQuote ChangeFromPreviousClose_volatility_60days', 'EndOfDayQuote ChangeFromPreviousClose_exmstd_60days', 'EndOfDayQuote ChangeFromPreviousClose_skew_60days', 'EndOfDayQuote ChangeFromPreviousClose_kurt_60days', 'EndOfDayQuote ChangeFromPreviousClose_MA_gap_60days', 'EndOfDayQuote ChangeFromPreviousClose_EMA_gap_60days', 'EndOfDayQuote ChangeFromPreviousClose_MAmax_gap_60days', 'EndOfDayQuote VWAP_return_5days', 'EndOfDayQuote VWAP_volatility_5days', 'EndOfDayQuote VWAP_exmstd_5days', 'EndOfDayQuote VWAP_skew_5days', 'EndOfDayQuote VWAP_kurt_5days', 'EndOfDayQuote VWAP_MA_gap_5days', 'EndOfDayQuote VWAP_EMA_gap_5days', 'EndOfDayQuote VWAP_MAmax_gap_5days', 'EndOfDayQuote VWAP_return_10days', 'EndOfDayQuote VWAP_volatility_10days', 'EndOfDayQuote VWAP_exmstd_10days', 'EndOfDayQuote VWAP_skew_10days', 'EndOfDayQuote VWAP_kurt_10days', 'EndOfDayQuote VWAP_MA_gap_10days', 'EndOfDayQuote VWAP_EMA_gap_10days', 'EndOfDayQuote VWAP_MAmax_gap_10days', 'EndOfDayQuote VWAP_return_20days', 'EndOfDayQuote VWAP_volatility_20days', 'EndOfDayQuote VWAP_exmstd_20days', 'EndOfDayQuote VWAP_skew_20days', 'EndOfDayQuote VWAP_kurt_20days', 'EndOfDayQuote VWAP_MA_gap_20days', 'EndOfDayQuote VWAP_EMA_gap_20days', 'EndOfDayQuote VWAP_MAmax_gap_20days', 'EndOfDayQuote VWAP_return_40days', 'EndOfDayQuote VWAP_volatility_40days', 'EndOfDayQuote VWAP_exmstd_40days', 'EndOfDayQuote VWAP_skew_40days', 'EndOfDayQuote VWAP_kurt_40days', 'EndOfDayQuote VWAP_MA_gap_40days', 'EndOfDayQuote VWAP_EMA_gap_40days', 'EndOfDayQuote VWAP_MAmax_gap_40days', 'EndOfDayQuote VWAP_return_60days', 'EndOfDayQuote VWAP_volatility_60days', 'EndOfDayQuote VWAP_exmstd_60days', 'EndOfDayQuote VWAP_skew_60days', 'EndOfDayQuote VWAP_kurt_60days', 'EndOfDayQuote VWAP_MA_gap_60days', 'EndOfDayQuote VWAP_EMA_gap_60days', 'EndOfDayQuote VWAP_MAmax_gap_60days', 'RSI', 'MACD', 'MACD_9', 'MACD_d', 'Result_FinancialStatement AccountingStandard', 'Result_FinancialStatement FiscalYear', 'Result_FinancialStatement CompanyType', 'Result_FinancialStatement NetSales', 'Result_FinancialStatement OperatingIncome', 'Result_FinancialStatement OrdinaryIncome', 'Result_FinancialStatement NetIncome', 'Result_FinancialStatement TotalAssets', 'Result_FinancialStatement NetAssets', 'Forecast_FinancialStatement NetSales', 'Forecast_FinancialStatement OperatingIncome', 'Forecast_FinancialStatement OrdinaryIncome', 'Forecast_FinancialStatement NetIncome', 'profit_margin', 'equity_ratio', 'sector17', 'sector33', 'size_group', 'per_like', 'pbr_like', 'roe_like']
         print('{:,} features: {}'.format(len(feature_columns), feature_columns))
         
         # # get model
@@ -1000,11 +1008,11 @@ class ScoringService(object):
             df[label] = 0
 
         num_models = len(model_names) * len(labels) // 2 
-        sum_weights = 0.35
-        # sum_weights = 3
+        # sum_weights = 0.35
+        sum_weights = num_models
         for label in labels:
-            weight = 1 / int(label.split('_')[-1])
-            # weight = 1
+            # weight = 1 / int(label.split('_')[-1])
+            weight = 1
             if 'high' in label:
                 label_ = "label_high_20"
             elif 'low' in label:
