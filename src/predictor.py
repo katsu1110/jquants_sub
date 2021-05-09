@@ -984,7 +984,7 @@ class ScoringService(object):
         # 日付と銘柄コードに絞り込み
         df = feats.loc[:, ["code"]].copy()
         # 購入金額を設定 (ここでは一律50000とする)
-        df.loc[:, "budget"] = 80000
+        df.loc[:, "budget"] = 90000
 
         # # codeを出力形式の１列目と一致させる
         # df.loc[:, "code"] = df.index.strftime("%Y-%m-%d-") + df.loc[:, "code"].astype(
