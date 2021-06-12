@@ -38,8 +38,6 @@ __pycache__/
 *.so
 
 # Distribution / packaging
-model/
-model_old/
 .Python
 build/
 develop-eggs/
@@ -53,6 +51,9 @@ parts/
 sdist/
 var/
 wheels/
+model/
+model_old/
+old/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
